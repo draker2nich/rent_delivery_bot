@@ -4,7 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database import Database
-from utils import get_main_keyboard, edit_or_send, format_booking
+from utils import get_main_keyboard, edit_or_send, format_order
 from config import logger
 
 router = Router()
@@ -16,10 +16,10 @@ async def tasks_today(callback: CallbackQuery):
     """Просмотр задач на сегодня"""
     today = datetime.now().strftime('%Y-%m-%d')
     
-    to_give = db.get_bookings_for_date(today, 'start')
-    to_take = db.get_bookings_for_date(today, 'end')
+    orders_to_give = db.get_orders_for_date(today, 'start')
+    orders_to_take = db.get_orders_for_date(today, 'end')
     
-    if not to_give and not to_take:
+    if not orders_to_give and not orders_to_take:
         await edit_or_send(
             callback,
             "📅 <b>Задачи на сегодня</b>\n\n"
@@ -33,27 +33,32 @@ async def tasks_today(callback: CallbackQuery):
     text = f"📅 <b>ЗАДАЧИ НА СЕГОДНЯ</b>\n"
     text += f"📆 {datetime.now().strftime('%d.%m.%Y')}\n\n"
     
-    if to_give:
-        text += f"🟢 <b>ВЫДАТЬ ОБОРУДОВАНИЕ ({len(to_give)}):</b>\n\n"
-        for booking in to_give:
-            text += format_booking(booking)
-            text += "━━━━━━━━━━━━━━━━\n\n"
+    if orders_to_give:
+        text += f"🟢 <b>ВЫДАТЬ ({len(orders_to_give)}):</b>\n"
+        for order in orders_to_give[:10]:  # Макс 10
+            text += format_order(order, show_items=True)
+            text += "\n"
+        if len(orders_to_give) > 10:
+            text += f"<i>... ещё {len(orders_to_give) - 10}</i>\n"
+        text += "\n"
     
-    if to_take:
-        text += f"🔴 <b>ЗАБРАТЬ ОБОРУДОВАНИЕ ({len(to_take)}):</b>\n\n"
-        for i, booking in enumerate(to_take):
-            text += format_booking(booking)
-            if i < len(to_take) - 1:
-                text += "━━━━━━━━━━━━━━━━\n\n"
+    if orders_to_take:
+        text += f"🔴 <b>ЗАБРАТЬ ({len(orders_to_take)}):</b>\n"
+        for order in orders_to_take[:10]:  # Макс 10
+            text += format_order(order, show_items=True)
+            text += "\n"
+        if len(orders_to_take) > 10:
+            text += f"<i>... ещё {len(orders_to_take) - 10}</i>\n"
     
     builder = InlineKeyboardBuilder()
     
     # Кнопки для возврата оборудования
-    if to_take:
-        for booking in to_take:
+    if orders_to_take:
+        for order in orders_to_take[:5]:  # Макс 5 кнопок
+            order_id = order[0]
             builder.row(InlineKeyboardButton(
-                text=f"✅ Возвращено #{booking[0]}",
-                callback_data=f"complete_{booking[0]}"
+                text=f"✅ Возвращено #{order_id}",
+                callback_data=f"complete_{order_id}"
             ))
     
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
@@ -68,10 +73,10 @@ async def tasks_tomorrow(callback: CallbackQuery):
     tomorrow = (datetime.now() + timedelta(days=1))
     tomorrow_str = tomorrow.strftime('%Y-%m-%d')
     
-    to_give = db.get_bookings_for_date(tomorrow_str, 'start')
-    to_take = db.get_bookings_for_date(tomorrow_str, 'end')
+    orders_to_give = db.get_orders_for_date(tomorrow_str, 'start')
+    orders_to_take = db.get_orders_for_date(tomorrow_str, 'end')
     
-    if not to_give and not to_take:
+    if not orders_to_give and not orders_to_take:
         await edit_or_send(
             callback,
             "📅 <b>Задачи на завтра</b>\n\n"
@@ -85,18 +90,22 @@ async def tasks_tomorrow(callback: CallbackQuery):
     text = f"📅 <b>ЗАДАЧИ НА ЗАВТРА</b>\n"
     text += f"📆 {tomorrow.strftime('%d.%m.%Y')}\n\n"
     
-    if to_give:
-        text += f"🟢 <b>ВЫДАТЬ ОБОРУДОВАНИЕ ({len(to_give)}):</b>\n\n"
-        for booking in to_give:
-            text += format_booking(booking)
-            text += "━━━━━━━━━━━━━━━━\n\n"
+    if orders_to_give:
+        text += f"🟢 <b>ВЫДАТЬ ({len(orders_to_give)}):</b>\n"
+        for order in orders_to_give[:10]:  # Макс 10
+            text += format_order(order, show_items=True)
+            text += "\n"
+        if len(orders_to_give) > 10:
+            text += f"<i>... ещё {len(orders_to_give) - 10}</i>\n"
+        text += "\n"
     
-    if to_take:
-        text += f"🟡 <b>ЗАБРАТЬ ОБОРУДОВАНИЕ ({len(to_take)}):</b>\n\n"
-        for i, booking in enumerate(to_take):
-            text += format_booking(booking)
-            if i < len(to_take) - 1:
-                text += "━━━━━━━━━━━━━━━━\n\n"
+    if orders_to_take:
+        text += f"🟡 <b>ЗАБРАТЬ ({len(orders_to_take)}):</b>\n"
+        for order in orders_to_take[:10]:  # Макс 10
+            text += format_order(order, show_items=True)
+            text += "\n"
+        if len(orders_to_take) > 10:
+            text += f"<i>... ещё {len(orders_to_take) - 10}</i>\n"
     
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
@@ -106,18 +115,18 @@ async def tasks_tomorrow(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("complete_"))
-async def complete_booking(callback: CallbackQuery):
-    """Завершение бронирования"""
-    booking_id = int(callback.data.split("_")[1])
+async def complete_order(callback: CallbackQuery):
+    """Завершение заказа"""
+    order_id = int(callback.data.split("_")[1])
     
-    if db.mark_booking_completed(booking_id):
-        await callback.answer(f"✅ Бронь #{booking_id} завершена!", show_alert=True)
-        logger.info(f"Бронь #{booking_id} завершена администратором {callback.from_user.id}")
+    if db.mark_order_completed(order_id):
+        await callback.answer(f"✅ Заказ #{order_id} завершён!", show_alert=True)
+        logger.info(f"Заказ #{order_id} завершён администратором {callback.from_user.id}")
         
         # Обновляем список задач
         await tasks_today(callback)
     else:
-        await callback.answer("❌ Ошибка при завершении брони", show_alert=True)
+        await callback.answer("❌ Ошибка при завершении заказа", show_alert=True)
 
 
 @router.callback_query(F.data == "check_week")
@@ -127,9 +136,9 @@ async def check_week(callback: CallbackQuery):
     week_end = (today + timedelta(days=7)).strftime('%Y-%m-%d')
     today_str = today.strftime('%Y-%m-%d')
     
-    bookings = db.get_bookings_for_period(today_str, week_end)
+    orders = db.get_orders_for_period(today_str, week_end)
     
-    if not bookings:
+    if not orders:
         await edit_or_send(
             callback,
             "📅 <b>Записи на неделю</b>\n\n"
@@ -140,12 +149,18 @@ async def check_week(callback: CallbackQuery):
     else:
         text = f"📅 <b>ЗАПИСИ НА НЕДЕЛЮ</b>\n"
         text += f"📆 {today.strftime('%d.%m.%Y')} - {(today + timedelta(days=7)).strftime('%d.%m.%Y')}\n"
-        text += f"📊 Всего: {len(bookings)}\n\n"
+        text += f"📊 Всего заказов: {len(orders)}\n\n"
         
-        for i, booking in enumerate(bookings):
-            text += format_booking(booking)
-            if i < len(bookings) - 1:
+        # Ограничение: показываем максимум 5 заказов
+        max_display = 5
+        for i, order in enumerate(orders[:max_display]):
+            text += format_order(order, show_items=True)
+            if i < min(len(orders), max_display) - 1:
                 text += "━━━━━━━━━━━━━━━━\n\n"
+        
+        if len(orders) > max_display:
+            text += f"\n<i>... и ещё {len(orders) - max_display} заказов</i>\n"
+            text += f"<i>Используйте 'Календарь' для полного просмотра</i>"
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
@@ -162,9 +177,9 @@ async def view_calendar(callback: CallbackQuery):
     month_end = (today + timedelta(days=30)).strftime('%Y-%m-%d')
     today_str = today.strftime('%Y-%m-%d')
     
-    bookings = db.get_bookings_for_period(today_str, month_end)
+    orders = db.get_orders_for_period(today_str, month_end)
     
-    if not bookings:
+    if not orders:
         await edit_or_send(
             callback,
             "📊 <b>Календарь на месяц</b>\n\n"
@@ -175,15 +190,18 @@ async def view_calendar(callback: CallbackQuery):
     else:
         text = f"📊 <b>КАЛЕНДАРЬ НА МЕСЯЦ</b>\n"
         text += f"📆 {today.strftime('%d.%m.%Y')} - {(today + timedelta(days=30)).strftime('%d.%m.%Y')}\n"
-        text += f"📋 Всего: {len(bookings)}\n\n"
+        text += f"📋 Всего заказов: {len(orders)}\n\n"
         
-        for i, booking in enumerate(bookings[:15]):
-            text += format_booking(booking)
-            if i < min(len(bookings), 15) - 1:
+        # Ограничение: показываем максимум 5 заказов
+        max_display = 5
+        for i, order in enumerate(orders[:max_display]):
+            text += format_order(order, show_items=True)
+            if i < min(len(orders), max_display) - 1:
                 text += "━━━━━━━━━━━━━━━━\n\n"
         
-        if len(bookings) > 15:
-            text += f"\n... и ещё {len(bookings) - 15} записей"
+        if len(orders) > max_display:
+            text += f"\n<i>Показано {max_display} из {len(orders)} заказов</i>\n"
+            text += f"<i>Используйте 'Отчёты' для полного списка</i>"
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
