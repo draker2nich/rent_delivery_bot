@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -177,7 +177,7 @@ async def view_calendar(callback: CallbackQuery):
         text += f"📆 {today.strftime('%d.%m.%Y')} - {(today + timedelta(days=30)).strftime('%d.%m.%Y')}\n"
         text += f"📋 Всего: {len(bookings)}\n\n"
         
-        for i, booking in enumerate(bookings[:15]):  # Ограничение для читаемости
+        for i, booking in enumerate(bookings[:15]):
             text += format_booking(booking)
             if i < min(len(bookings), 15) - 1:
                 text += "━━━━━━━━━━━━━━━━\n\n"

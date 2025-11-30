@@ -1,4 +1,4 @@
-from aiogram import Router, F, Bot
+from aiogram import F, Router, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -49,12 +49,10 @@ async def send_message_get_id(message: Message, state: FSMContext):
 
 
 @router.message(MessageStates.entering_message)
-async def send_message_execute(message: Message, state: FSMContext):
+async def send_message_execute(message: Message, state: FSMContext, bot: Bot):
     """Отправка сообщения пользователю"""
     data = await state.get_data()
     target_user_id = data['target_user_id']
-    
-    bot = message.bot
     
     try:
         await bot.send_message(target_user_id, message.text)

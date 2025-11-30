@@ -1,8 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
-from aiogram.types import InlineKeyboardButton, CallbackQuery, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
 from config import logger
 
 
@@ -87,7 +86,7 @@ def format_booking(booking: Tuple, show_actions: bool = False) -> str:
     return text
 
 
-def get_main_keyboard() -> InlineKeyboardMarkup:
+def get_main_keyboard():
     """Главная клавиатура меню"""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📝 Создать бронь", callback_data="create_booking"))
