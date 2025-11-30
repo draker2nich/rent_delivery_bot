@@ -2,11 +2,12 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import Database
 from utils import get_main_keyboard, edit_or_send, format_booking
 
 router = Router()
-db = Database()
+
+from database import get_database
+db = get_database()
 
 
 @router.callback_query(F.data == "delete_booking_menu")

@@ -49,6 +49,9 @@ def parse_date_range(text: str) -> Tuple[Optional[Tuple[str, str]], Optional[str
 
 def format_order(order: Tuple, show_items: bool = True) -> str:
     """Форматирование информации о заказе"""
+    if not order or len(order) < 5:
+        return "❌ Ошибка: неверный формат заказа"
+    
     order_id, client_name, client_phone, start, end = order[:5]
     delivery_type = order[5] if len(order) > 5 else 'pickup'
     delivery_comment = order[6] if len(order) > 6 else ''
@@ -58,44 +61,49 @@ def format_order(order: Tuple, show_items: bool = True) -> str:
     delivery_emoji = "🚗" if delivery_type == 'delivery' else "🏃"
     delivery_text = "Доставка" if delivery_type == 'delivery' else "Самовывоз"
     
-    today = datetime.now().date()
-    start_dt = datetime.strptime(start, '%Y-%m-%d').date()
-    end_dt = datetime.strptime(end, '%Y-%m-%d').date()
+    try:
+        today = datetime.now().date()
+        start_dt = datetime.strptime(start, '%Y-%m-%d').date()
+        end_dt = datetime.strptime(end, '%Y-%m-%d').date()
+        
+        highlight = ""
+        if end_dt == today:
+            highlight = "🔴 "
+        elif end_dt == today + timedelta(days=1):
+            highlight = "🟡 "
+        elif start_dt == today:
+            highlight = "🟢 "
+        elif start_dt == today + timedelta(days=1):
+            highlight = "🟢 "
+        
+        text = f"{highlight}<b>#{order_id}</b> | {client_name}\n"
+        text += f"📞 {client_phone}\n"
+        text += f"📅 {start} — {end}\n"
+        
+        # Получаем позиции заказа
+        if show_items:
+            try:
+                items = db.get_order_items(order_id)
+                if items:
+                    text += "📦 "
+                    items_text = ", ".join([f"{item_name}×{quantity}" for _, item_name, quantity, _ in items])
+                    text += f"{items_text}\n"
+            except Exception as e:
+                logger.error(f"Ошибка получения позиций для заказа {order_id}: {e}")
+        
+        text += f"{delivery_emoji} {delivery_text}"
+        
+        if delivery_comment and len(delivery_comment) < 50:
+            text += f" ({delivery_comment[:47]}...)" if len(delivery_comment) > 47 else f" ({delivery_comment})"
+        
+        if cost:
+            text += f" | 💰 {cost}"
+        
+        return text
+    except Exception as e:
+        logger.error(f"Ошибка форматирования заказа {order_id}: {e}")
+        return f"❌ Ошибка форматирования заказа #{order_id}"
     
-    highlight = ""
-    if end_dt == today:
-        highlight = "🔴 "
-    elif end_dt == today + timedelta(days=1):
-        highlight = "🟡 "
-    elif start_dt == today:
-        highlight = "🟢 "
-    elif start_dt == today + timedelta(days=1):
-        highlight = "🟢 "
-    
-    text = f"{highlight}<b>#{order_id}</b> | {client_name}\n"
-    text += f"📞 {client_phone}\n"
-    text += f"📅 {start} — {end}\n"
-    
-    # Получаем позиции заказа
-    if show_items:
-        items = db.get_order_items(order_id)
-        if items:
-            text += "📦 "
-            # Компактный формат: "Телевизор×1, Стулья×15"
-            items_text = ", ".join([f"{item_name}×{quantity}" for _, item_name, quantity, _ in items])
-            text += f"{items_text}\n"
-    
-    text += f"{delivery_emoji} {delivery_text}"
-    
-    if delivery_comment and len(delivery_comment) < 50:
-        text += f" ({delivery_comment[:47]}...)" if len(delivery_comment) > 47 else f" ({delivery_comment})"
-    
-    if cost:
-        text += f" | 💰 {cost}"
-    
-    return text
-
-
 def format_booking(booking: Tuple, show_actions: bool = False) -> str:
     """Legacy функция для обратной совместимости"""
     # Старый формат: (id, resource_name, client_name, phone, start, end, quantity, ...)

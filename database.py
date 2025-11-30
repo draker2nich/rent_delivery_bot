@@ -314,18 +314,30 @@ class Database:
     
     def get_order_items(self, order_id: int) -> List[Tuple]:
         """Получить все позиции заказа"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT oi.id, r.name, oi.quantity, r.id
-                FROM order_items oi
-                JOIN resources r ON oi.resource_id = r.id
-                WHERE oi.order_id = ?
-            """, (order_id,))
-            return cursor.fetchall()
-    
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT oi.id, r.name, oi.quantity, r.id
+                    FROM order_items oi
+                    JOIN resources r ON oi.resource_id = r.id
+                    WHERE oi.order_id = ?
+                """, (order_id,))
+                result = cursor.fetchall()
+                return result if result else []
+        except Exception as e:
+            logger.error(f"Ошибка получения позиций заказа {order_id}: {e}")
+            return []
+        
     def get_orders_for_date(self, date: str, filter_type: str = 'all') -> List[Tuple]:
-        """Получить заказы на определенную дату"""
+        """Получить заказы на определенную дату
+        
+        Args:
+            date: Дата в формате YYYY-MM-DD
+            filter_type: 'start' - заказы начинающиеся в эту дату,
+                        'end' - заказы заканчивающиеся в эту дату,
+                        'all' - все заказы активные в эту дату
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -338,7 +350,7 @@ class Database:
             
             query = f"""
                 SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
-                       o.delivery_type, o.delivery_comment, o.cost, o.status
+                    o.delivery_type, o.delivery_comment, o.cost, o.status
                 FROM orders o
                 JOIN clients c ON o.client_id = c.id
                 WHERE {date_condition} AND o.status = 'active'
@@ -347,6 +359,23 @@ class Database:
             
             cursor.execute(query, (date,))
             return cursor.fetchall()
+
+    def get_order_details(self, order_id: int) -> Optional[Tuple]:
+        """Получить детали заказа"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
+                        o.delivery_type, o.delivery_comment, o.cost, o.status
+                    FROM orders o
+                    JOIN clients c ON o.client_id = c.id
+                    WHERE o.id = ?
+                """, (order_id,))
+                return cursor.fetchone()
+        except Exception as e:
+            logger.error(f"Ошибка получения деталей заказа {order_id}: {e}")
+            return None
     
     def get_orders_for_period(self, start_date: str, end_date: str) -> List[Tuple]:
         """Получить заказы за период"""
@@ -627,3 +656,12 @@ class Database:
     def delete_booking(self, booking_id: int) -> bool:
         """Legacy: удалить бронь"""
         return self.delete_order(booking_id)
+    
+_db_instance = None
+
+def get_database() -> Database:
+    """Получить единственный экземпляр базы данных"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = Database()
+    return _db_instance

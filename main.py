@@ -1,9 +1,10 @@
 import asyncio
+import signal
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher
 
 from config import BOT_TOKEN, ADMIN_IDS, logger
-from database import Database
+from database import get_database  # ИЗМЕНЕНО
 from utils import get_main_keyboard
 
 # Импорт роутеров
@@ -24,7 +25,7 @@ from handlers import edit_resource, edit_booking, broadcast, calendar as calenda
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-db = Database()
+db = get_database()  # ИЗМЕНЕНО - используем singleton
 
 # Регистрация роутеров (порядок важен!)
 dp.include_router(common.router)
@@ -39,10 +40,13 @@ dp.include_router(messaging.router)
 dp.include_router(broadcast.router)
 dp.include_router(calendar_handler.router)
 
+# Флаг для остановки задач
+shutdown_event = asyncio.Event()
+
 
 async def send_daily_reminders():
     """Ежедневные напоминания о задачах"""
-    while True:
+    while not shutdown_event.is_set():
         try:
             now = datetime.now()
             if now.hour == 9 and now.minute == 0:
@@ -74,13 +78,29 @@ async def send_daily_reminders():
                         except Exception as e:
                             logger.error(f"Ошибка отправки напоминания админу {admin_id}: {e}")
                 
-                await asyncio.sleep(3600)
+                await asyncio.sleep(3600)  # Ждем час
             else:
-                await asyncio.sleep(60)
+                await asyncio.sleep(60)  # Проверяем каждую минуту
         
+        except asyncio.CancelledError:
+            logger.info("Задача напоминаний отменена")
+            break
         except Exception as e:
             logger.error(f"Ошибка в задаче напоминаний: {e}")
             await asyncio.sleep(60)
+
+
+async def on_shutdown():
+    """Корректное завершение работы бота"""
+    logger.info("🛑 Остановка бота...")
+    
+    # Останавливаем задачу напоминаний
+    shutdown_event.set()
+    
+    # Закрываем сессию бота
+    await bot.session.close()
+    
+    logger.info("✅ Бот остановлен")
 
 
 async def main():
@@ -92,11 +112,26 @@ async def main():
     logger.info("=" * 50)
     
     # Запуск задачи напоминаний
-    asyncio.create_task(send_daily_reminders())
+    reminder_task = asyncio.create_task(send_daily_reminders())
     
-    # Запуск polling
-    await dp.start_polling(bot)
+    try:
+        # Запуск polling
+        await dp.start_polling(bot)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Получен сигнал остановки")
+    finally:
+        # Корректное завершение
+        reminder_task.cancel()
+        try:
+            await reminder_task
+        except asyncio.CancelledError:
+            pass
+        
+        await on_shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Программа завершена пользователем")

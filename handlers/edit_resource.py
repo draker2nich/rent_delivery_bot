@@ -3,12 +3,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import Database
 from states import ResourceStates
 from utils import get_main_keyboard, edit_or_send
 
 router = Router()
-db = Database()
+from database import get_database
+db = get_database()
 
 
 @router.callback_query(F.data == "edit_resource_menu")

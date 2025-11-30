@@ -6,10 +6,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from states import MessageStates
 from utils import get_main_keyboard, edit_or_send
 from config import logger
-from database import Database
 
 router = Router()
-db = Database()
+
+from database import get_database
+db = get_database()
 
 
 @router.callback_query(F.data == "broadcast_message")

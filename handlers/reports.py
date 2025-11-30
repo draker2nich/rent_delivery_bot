@@ -7,13 +7,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import Database
 from states import ReportStates
 from utils import get_main_keyboard, edit_or_send
 from config import logger
 
 router = Router()
-db = Database()
+from database import get_database
+db = get_database()
 
 
 @router.callback_query(F.data == "reports_menu")
@@ -212,8 +212,8 @@ async def generate_operations_report(message: Message, start_date: str = None, e
     if start_date and end_date:
         period_text = f"с {start_date} по {end_date}"
     
-    active_count = sum(1 for op in operations if op[8] == 'active')
-    completed_count = sum(1 for op in operations if op[8] == 'completed')
+    active_count = sum(1 for op in operations if op[6] == 'active')
+    completed_count = sum(1 for op in operations if op[6] == 'completed')
     
     text = f"📊 <b>ИСТОРИЯ ОПЕРАЦИЙ</b>\n"
     text += f"📅 Период: {period_text}\n"
@@ -222,25 +222,41 @@ async def generate_operations_report(message: Message, start_date: str = None, e
     text += f"🏁 Завершённые: {completed_count}\n\n"
     
     for op in operations[:15]:
-        booking_id, resource, client, phone, start, end, quantity, cost, status, created, completed = op
+        # order_id, client_name, client_phone, start_date, end_date, cost, status, created_at, completed_at
+        order_id = op[0]
+        client_name = op[1]
+        client_phone = op[2]
+        start = op[3]
+        end = op[4]
+        cost = op[5]
+        status = op[6]
+        created = op[7]
+        completed = op[8] if len(op) > 8 else None
+        
+        # Получаем позиции заказа
+        items = db.get_order_items(order_id)
         
         status_emoji = "✅" if status == 'active' else "🏁"
-        text += f"{status_emoji} <b>Бронь #{booking_id}</b>\n"
-        text += f"   🎯 {resource} ({quantity} шт.)\n"
-        text += f"   👤 {client} ({phone})\n"
+        text += f"{status_emoji} <b>Заказ #{order_id}</b>\n"
+        text += f"   👤 {client_name} ({client_phone})\n"
         text += f"   📅 {start} — {end}\n"
+        
+        if items:
+            text += "   📦 "
+            items_text = ", ".join([f"{item_name}×{quantity}" for _, item_name, quantity, _ in items])
+            text += f"{items_text}\n"
+        
         if cost:
             text += f"   💰 {cost}\n"
-        text += f"   📝 {created[:16]}\n"
+        text += f"   📝 Создан: {created[:16]}\n"
         if completed:
-            text += f"   ✅ {completed[:16]}\n"
+            text += f"   ✅ Завершён: {completed[:16]}\n"
         text += "\n"
     
     if len(operations) > 15:
         text += f"<i>... и ещё {len(operations) - 15} операций</i>"
     
     await message.answer(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
-
 
 @router.callback_query(F.data == "download_clients_csv")
 async def download_clients_csv(callback: CallbackQuery):
