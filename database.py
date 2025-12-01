@@ -1,5 +1,6 @@
 import sqlite3
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
+from datetime import datetime, timedelta
 from config import DATABASE_PATH, logger
 
 
@@ -26,7 +27,6 @@ class Database:
                 )
             """)
             
-            # Новая таблица для клиентов
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS clients (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +37,6 @@ class Database:
                 )
             """)
             
-            # Обновленная таблица заказов (orders) - теперь без resource_id
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +54,6 @@ class Database:
                 )
             """)
             
-            # Таблица позиций заказа (order_items) - связь заказов с ресурсами
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS order_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,54 +65,70 @@ class Database:
                 )
             """)
             
-            # Миграция старых данных из bookings в новую структуру
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bookings'")
-            if cursor.fetchone():
-                logger.info("Обнаружена старая таблица bookings, начинаю миграцию...")
-                
-                # Копируем клиентов
-                cursor.execute("""
-                    INSERT OR IGNORE INTO clients (name, phone)
-                    SELECT DISTINCT client_name, client_phone FROM bookings
-                """)
-                
-                # Копируем заказы
-                cursor.execute("""
-                    INSERT INTO orders (client_id, start_date, end_date, delivery_type, 
-                                       delivery_comment, cost, status, created_by, created_at, completed_at)
-                    SELECT 
-                        c.id,
-                        b.start_date,
-                        b.end_date,
-                        b.delivery_type,
-                        b.delivery_comment,
-                        b.cost,
-                        b.status,
-                        b.created_by,
-                        b.created_at,
-                        b.completed_at
-                    FROM bookings b
-                    JOIN clients c ON c.name = b.client_name AND c.phone = b.client_phone
-                """)
-                
-                # Копируем позиции заказов
-                cursor.execute("""
-                    INSERT INTO order_items (order_id, resource_id, quantity)
-                    SELECT 
-                        o.id,
-                        b.resource_id,
-                        b.quantity
-                    FROM bookings b
-                    JOIN clients c ON c.name = b.client_name AND c.phone = b.client_phone
-                    JOIN orders o ON o.client_id = c.id 
-                        AND o.start_date = b.start_date 
-                        AND o.end_date = b.end_date
-                        AND o.created_at = b.created_at
-                """)
-                
+            # МИГРАЦИЯ: добавление полей для контроля возврата
+            try:
+                cursor.execute("SELECT return_confirmed FROM orders LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("Применяем миграцию: добавление полей контроля возврата")
+                cursor.execute("ALTER TABLE orders ADD COLUMN return_confirmed BOOLEAN DEFAULT 0")
+                cursor.execute("ALTER TABLE orders ADD COLUMN return_confirmed_at TIMESTAMP")
+                cursor.execute("ALTER TABLE orders ADD COLUMN return_confirmed_by INTEGER")
+                conn.commit()
                 logger.info("Миграция завершена успешно")
             
+            # МИГРАЦИЯ: добавление поля issued_at для отслеживания выдачи
+            try:
+                cursor.execute("SELECT issued_at FROM orders LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("Применяем миграцию: добавление поля issued_at")
+                cursor.execute("ALTER TABLE orders ADD COLUMN issued_at TIMESTAMP")
+                cursor.execute("ALTER TABLE orders ADD COLUMN issued_by INTEGER")
+                conn.commit()
+                logger.info("Миграция issued_at завершена успешно")
+            
+            # СОЗДАНИЕ ИНДЕКСОВ для оптимизации
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_dates ON orders(start_date, end_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_client ON orders(client_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_order_items_resource ON order_items(resource_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone)")
+            logger.info("Индексы базы данных созданы успешно")
+            
+            # Таблица аудита действий
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id INTEGER,
+                    details TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)")
+            
             conn.commit()
+    
+    # === AUDIT LOG ===
+    
+    def log_action(self, user_id: int, action: str, entity_type: str, 
+                   entity_id: int = None, details: str = None):
+        """Записать действие в лог аудита"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO audit_log 
+                    (user_id, action, entity_type, entity_id, details)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, action, entity_type, entity_id, details))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка записи в audit log: {e}")
     
     # === КЛИЕНТЫ ===
     
@@ -123,14 +137,8 @@ class Database:
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT OR IGNORE INTO clients (name, phone) VALUES (?, ?)",
-                    (name, phone)
-                )
-                cursor.execute(
-                    "SELECT id FROM clients WHERE name = ? AND phone = ?",
-                    (name, phone)
-                )
+                cursor.execute("INSERT OR IGNORE INTO clients (name, phone) VALUES (?, ?)", (name, phone))
+                cursor.execute("SELECT id FROM clients WHERE name = ? AND phone = ?", (name, phone))
                 client_id = cursor.fetchone()[0]
                 conn.commit()
                 logger.info(f"Клиент добавлен/получен: {name} (ID: {client_id})")
@@ -252,7 +260,7 @@ class Database:
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
                 WHERE oi.resource_id = ?
-                AND o.status = 'active'
+                AND o.status IN ('pending', 'issued', 'overdue')
                 AND NOT (o.end_date < ? OR o.start_date > ?)
             """
             params = [resource_id, start_date, end_date]
@@ -272,45 +280,66 @@ class Database:
         available = self.get_available_quantity(resource_id, start_date, end_date, exclude_order_id)
         return available >= quantity
     
-    # === ЗАКАЗЫ ===
+    # === ЗАКАЗЫ (АТОМАРНОЕ СОЗДАНИЕ) ===
     
-    def create_order(self, client_id: int, start_date: str, end_date: str,
-                    delivery_type: str, delivery_comment: str, cost: str,
-                    created_by: int) -> Optional[int]:
-        """Создать новый заказ (без позиций)"""
+    def create_order_with_items(self, client_id: int, start_date: str, end_date: str,
+                               delivery_type: str, delivery_comment: str, cost: str,
+                               created_by: int, items: List[Dict]) -> Optional[int]:
+        """
+        Создать заказ с позициями в одной атомарной транзакции.
+        """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                
+                # 1. Проверяем доступность ВСЕХ ресурсов перед созданием
+                for item in items:
+                    available = self.get_available_quantity(
+                        item['resource_id'], start_date, end_date
+                    )
+                    if available < item['quantity']:
+                        logger.error(
+                            f"Недостаточно ресурса {item['resource_id']}: "
+                            f"нужно {item['quantity']}, доступно {available}"
+                        )
+                        return None
+                
+                # 2. Создаём заказ
                 cursor.execute("""
                     INSERT INTO orders 
                     (client_id, start_date, end_date, delivery_type, 
-                     delivery_comment, cost, created_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                     delivery_comment, cost, created_by, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
                 """, (client_id, start_date, end_date, delivery_type, 
                       delivery_comment, cost, created_by))
-                conn.commit()
+                
                 order_id = cursor.lastrowid
-                logger.info(f"Заказ создан: #{order_id}")
-                return order_id
-        except Exception as e:
-            logger.error(f"Ошибка создания заказа: {e}")
-            return None
-    
-    def add_order_item(self, order_id: int, resource_id: int, quantity: int) -> bool:
-        """Добавить позицию в заказ"""
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO order_items (order_id, resource_id, quantity)
-                    VALUES (?, ?, ?)
-                """, (order_id, resource_id, quantity))
+                
+                # 3. Добавляем все позиции
+                for item in items:
+                    cursor.execute("""
+                        INSERT INTO order_items (order_id, resource_id, quantity)
+                        VALUES (?, ?, ?)
+                    """, (order_id, item['resource_id'], item['quantity']))
+                
+                # 4. Коммитим только если всё успешно
                 conn.commit()
-                logger.info(f"Позиция добавлена в заказ #{order_id}: ресурс {resource_id}, кол-во {quantity}")
-                return True
+                
+                # 5. Логируем действие
+                self.log_action(
+                    user_id=created_by,
+                    action='created',
+                    entity_type='order',
+                    entity_id=order_id,
+                    details=f"Создан заказ с {len(items)} позициями"
+                )
+                
+                logger.info(f"Заказ #{order_id} создан с {len(items)} позициями")
+                return order_id
+                
         except Exception as e:
-            logger.error(f"Ошибка добавления позиции: {e}")
-            return False
+            logger.error(f"Ошибка создания заказа с позициями: {e}")
+            return None
     
     def get_order_items(self, order_id: int) -> List[Tuple]:
         """Получить все позиции заказа"""
@@ -328,16 +357,245 @@ class Database:
         except Exception as e:
             logger.error(f"Ошибка получения позиций заказа {order_id}: {e}")
             return []
+    
+    # === КОНТРОЛЬ ВОЗВРАТА ===
+    
+    def get_orders_to_give_today(self) -> List[Tuple]:
+        """Получить заказы на выдачу сегодня (статус pending)"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
+                       o.delivery_type, o.delivery_comment, o.cost, o.status
+                FROM orders o
+                JOIN clients c ON o.client_id = c.id
+                WHERE o.start_date = ? AND o.status = 'pending'
+                ORDER BY o.created_at
+            """, (today,))
+            return cursor.fetchall()
+    
+    def get_orders_to_give_tomorrow(self) -> List[Tuple]:
+        """Получить заказы на выдачу завтра (статус pending)"""
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
+                       o.delivery_type, o.delivery_comment, o.cost, o.status
+                FROM orders o
+                JOIN clients c ON o.client_id = c.id
+                WHERE o.start_date = ? AND o.status = 'pending'
+                ORDER BY o.created_at
+            """, (tomorrow,))
+            return cursor.fetchall()
+    
+    def get_orders_to_return_today(self) -> List[Tuple]:
+        """Получить заказы на возврат сегодня (статус issued, end_date = сегодня)"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
+                       o.delivery_type, o.delivery_comment, o.cost, o.status,
+                       o.return_confirmed
+                FROM orders o
+                JOIN clients c ON o.client_id = c.id
+                WHERE o.end_date = ? AND o.status = 'issued'
+                ORDER BY o.issued_at
+            """, (today,))
+            return cursor.fetchall()
+    
+    def get_orders_to_return_tomorrow(self) -> List[Tuple]:
+        """Получить заказы на возврат завтра (статус issued, end_date = завтра)"""
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
+                       o.delivery_type, o.delivery_comment, o.cost, o.status,
+                       o.return_confirmed
+                FROM orders o
+                JOIN clients c ON o.client_id = c.id
+                WHERE o.end_date = ? AND o.status = 'issued'
+                ORDER BY o.issued_at
+            """, (tomorrow,))
+            return cursor.fetchall()
+    
+    def get_overdue_orders(self) -> List[Tuple]:
+        """Получить просроченные заказы (выдано, но не возвращено вовремя)"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
+                       o.delivery_type, o.delivery_comment, o.cost, o.status,
+                       julianday(?) - julianday(o.end_date) as days_overdue
+                FROM orders o
+                JOIN clients c ON o.client_id = c.id
+                WHERE o.end_date < ? 
+                  AND o.status IN ('issued', 'overdue')
+                  AND o.return_confirmed = 0
+                ORDER BY o.end_date ASC
+            """, (today, today))
+            return cursor.fetchall()
+    
+    def issue_order(self, order_id: int, issued_by: int) -> bool:
+        """Выдать оборудование клиенту (pending -> issued)"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE orders 
+                    SET status = 'issued',
+                        issued_at = CURRENT_TIMESTAMP,
+                        issued_by = ?
+                    WHERE id = ? AND status = 'pending'
+                """, (issued_by, order_id))
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    self.log_action(
+                        user_id=issued_by,
+                        action='issued',
+                        entity_type='order',
+                        entity_id=order_id,
+                        details=f"Оборудование выдано клиенту"
+                    )
+                    logger.info(f"Заказ #{order_id} выдан администратором {issued_by}")
+                    return True
+                
+                logger.warning(f"Заказ #{order_id} не найден или уже выдан")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка выдачи заказа #{order_id}: {e}")
+            return False
+    
+    def confirm_return(self, order_id: int, confirmed_by: int) -> bool:
+        """Подтвердить возврат оборудования (issued -> completed)"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE orders 
+                    SET return_confirmed = 1,
+                        return_confirmed_at = CURRENT_TIMESTAMP,
+                        return_confirmed_by = ?,
+                        status = 'completed',
+                        completed_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status IN ('issued', 'overdue')
+                """, (confirmed_by, order_id))
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    self.log_action(
+                        user_id=confirmed_by,
+                        action='confirmed_return',
+                        entity_type='order',
+                        entity_id=order_id,
+                        details=f"Подтверждён возврат оборудования"
+                    )
+                    logger.info(f"Возврат подтверждён: заказ #{order_id}, администратор {confirmed_by}")
+                    return True
+                
+                logger.warning(f"Заказ #{order_id} не найден или уже завершён")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка подтверждения возврата для заказа #{order_id}: {e}")
+            return False
+    
+    def update_overdue_status(self) -> int:
+        """Обновить статус просроченных заказов (issued -> overdue)"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE orders 
+                    SET status = 'overdue'
+                    WHERE end_date < ? 
+                      AND status = 'issued'
+                      AND return_confirmed = 0
+                """, (today,))
+                conn.commit()
+                
+                count = cursor.rowcount
+                if count > 0:
+                    logger.warning(f"Обновлено статусов 'overdue': {count}")
+                return count
+                
+        except Exception as e:
+            logger.error(f"Ошибка обновления статусов просроченных заказов: {e}")
+            return 0
+    
+    # === LEGACY API (для обратной совместимости) ===
+    
+    def get_all_active_bookings(self) -> List[Tuple]:
+        """Legacy: получить все активные брони"""
+        orders = self.get_all_active_orders()
+        result = []
         
+        for order in orders:
+            order_id = order[0]
+            items = self.get_order_items(order_id)
+            
+            for item in items:
+                _, resource_name, quantity, resource_id = item
+                result.append((
+                    order_id,
+                    resource_name,
+                    order[1],  # client_name
+                    order[2],  # client_phone
+                    order[3],  # start_date
+                    order[4],  # end_date
+                    quantity,
+                    order[5],  # delivery_type
+                    order[6],  # delivery_comment
+                    order[7],  # cost
+                    order[8]   # status
+                ))
+        
+        return result
+    
+    def get_booking_details(self, booking_id: int) -> Optional[Tuple]:
+        """Legacy: получить детали брони"""
+        order = self.get_order_details(booking_id)
+        if not order:
+            return None
+        
+        items = self.get_order_items(booking_id)
+        if not items:
+            return None
+        
+        # Возвращаем первую позицию (для совместимости)
+        item = items[0]
+        _, resource_name, quantity, _ = item
+        
+        return (
+            order[0],  # id
+            resource_name,
+            order[1],  # client_name
+            order[2],  # client_phone
+            order[3],  # start_date
+            order[4],  # end_date
+            quantity,
+            order[5],  # delivery_type
+            order[6],  # delivery_comment
+            order[7],  # cost
+            order[8]   # status
+        )
+    
+    def mark_booking_completed(self, booking_id: int) -> bool:
+        """Legacy: отметить бронь завершённой"""
+        return self.mark_order_completed(booking_id)
+    
+    def delete_booking(self, booking_id: int) -> bool:
+        """Legacy: удалить бронь"""
+        return self.delete_order(booking_id)
+    
     def get_orders_for_date(self, date: str, filter_type: str = 'all') -> List[Tuple]:
-        """Получить заказы на определенную дату
-        
-        Args:
-            date: Дата в формате YYYY-MM-DD
-            filter_type: 'start' - заказы начинающиеся в эту дату,
-                        'end' - заказы заканчивающиеся в эту дату,
-                        'all' - все заказы активные в эту дату
-        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -353,15 +611,14 @@ class Database:
                     o.delivery_type, o.delivery_comment, o.cost, o.status
                 FROM orders o
                 JOIN clients c ON o.client_id = c.id
-                WHERE {date_condition} AND o.status = 'active'
+                WHERE {date_condition} AND o.status IN ('pending', 'issued', 'overdue')
                 ORDER BY o.start_date
             """
             
             cursor.execute(query, (date,))
             return cursor.fetchall()
-
+    
     def get_order_details(self, order_id: int) -> Optional[Tuple]:
-        """Получить детали заказа"""
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -378,7 +635,6 @@ class Database:
             return None
     
     def get_orders_for_period(self, start_date: str, end_date: str) -> List[Tuple]:
-        """Получить заказы за период"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -387,13 +643,12 @@ class Database:
                 FROM orders o
                 JOIN clients c ON o.client_id = c.id
                 WHERE NOT (o.end_date < ? OR o.start_date > ?)
-                AND o.status = 'active'
+                AND o.status IN ('pending', 'issued', 'overdue')
                 ORDER BY o.start_date
             """, (start_date, end_date))
             return cursor.fetchall()
     
     def get_all_active_orders(self) -> List[Tuple]:
-        """Получить все активные заказы"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -401,26 +656,12 @@ class Database:
                        o.delivery_type, o.delivery_comment, o.cost, o.status
                 FROM orders o
                 JOIN clients c ON o.client_id = c.id
-                WHERE o.status = 'active'
+                WHERE o.status IN ('pending', 'issued', 'overdue')
                 ORDER BY o.start_date DESC, o.id DESC
             """)
             return cursor.fetchall()
     
-    def get_order_details(self, order_id: int) -> Optional[Tuple]:
-        """Получить детали заказа"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT o.id, c.name, c.phone, o.start_date, o.end_date,
-                       o.delivery_type, o.delivery_comment, o.cost, o.status
-                FROM orders o
-                JOIN clients c ON o.client_id = c.id
-                WHERE o.id = ?
-            """, (order_id,))
-            return cursor.fetchone()
-    
     def mark_order_completed(self, order_id: int) -> bool:
-        """Отметить заказ как завершённый"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -434,7 +675,6 @@ class Database:
             return False
     
     def delete_order(self, order_id: int) -> bool:
-        """Удалить заказ"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM orders WHERE id = ?", (order_id,))
@@ -519,144 +759,8 @@ class Database:
             
             cursor.execute(query, params)
             return cursor.fetchall()
-    
-    # Совместимость со старым API (для постепенной миграции)
-    def create_booking(self, resource_id: int, client_name: str, client_phone: str,
-                      start_date: str, end_date: str, quantity: int, delivery_type: str,
-                      delivery_comment: str, cost: str, created_by: int) -> Optional[int]:
-        """Создать бронь (legacy API)"""
-        client_id = self.add_client(client_name, client_phone)
-        if not client_id:
-            return None
-        
-        order_id = self.create_order(client_id, start_date, end_date, delivery_type,
-                                     delivery_comment, cost, created_by)
-        if not order_id:
-            return None
-        
-        if not self.add_order_item(order_id, resource_id, quantity):
-            self.delete_order(order_id)
-            return None
-        
-        return order_id
-    
-    def get_bookings_for_date(self, date: str, filter_type: str = 'all') -> List[Tuple]:
-        """Legacy: получить брони на дату"""
-        orders = self.get_orders_for_date(date, filter_type)
-        result = []
-        
-        for order in orders:
-            order_id = order[0]
-            items = self.get_order_items(order_id)
-            
-            for item in items:
-                _, resource_name, quantity, resource_id = item
-                result.append((
-                    order_id,
-                    resource_name,
-                    order[1],  # client_name
-                    order[2],  # client_phone
-                    order[3],  # start_date
-                    order[4],  # end_date
-                    quantity,
-                    order[5],  # delivery_type
-                    order[6],  # delivery_comment
-                    order[7],  # cost
-                    order[8]   # status
-                ))
-        
-        return result
-    
-    def get_bookings_for_period(self, start_date: str, end_date: str) -> List[Tuple]:
-        """Legacy: получить брони за период"""
-        orders = self.get_orders_for_period(start_date, end_date)
-        result = []
-        
-        for order in orders:
-            order_id = order[0]
-            items = self.get_order_items(order_id)
-            
-            for item in items:
-                _, resource_name, quantity, resource_id = item
-                result.append((
-                    order_id,
-                    resource_name,
-                    order[1],  # client_name
-                    order[2],  # client_phone
-                    order[3],  # start_date
-                    order[4],  # end_date
-                    quantity,
-                    order[5],  # delivery_type
-                    order[6],  # delivery_comment
-                    order[7],  # cost
-                    order[8]   # status
-                ))
-        
-        return result
-    
-    def get_all_active_bookings(self) -> List[Tuple]:
-        """Legacy: получить все активные брони"""
-        orders = self.get_all_active_orders()
-        result = []
-        
-        for order in orders:
-            order_id = order[0]
-            items = self.get_order_items(order_id)
-            
-            for item in items:
-                _, resource_name, quantity, resource_id = item
-                result.append((
-                    order_id,
-                    resource_name,
-                    order[1],  # client_name
-                    order[2],  # client_phone
-                    order[3],  # start_date
-                    order[4],  # end_date
-                    quantity,
-                    order[5],  # delivery_type
-                    order[6],  # delivery_comment
-                    order[7],  # cost
-                    order[8]   # status
-                ))
-        
-        return result
-    
-    def get_booking_details(self, booking_id: int) -> Optional[Tuple]:
-        """Legacy: получить детали брони"""
-        order = self.get_order_details(booking_id)
-        if not order:
-            return None
-        
-        items = self.get_order_items(booking_id)
-        if not items:
-            return None
-        
-        # Возвращаем первую позицию (для совместимости)
-        item = items[0]
-        _, resource_name, quantity, _ = item
-        
-        return (
-            order[0],  # id
-            resource_name,
-            order[1],  # client_name
-            order[2],  # client_phone
-            order[3],  # start_date
-            order[4],  # end_date
-            quantity,
-            order[5],  # delivery_type
-            order[6],  # delivery_comment
-            order[7],  # cost
-            order[8]   # status
-        )
-    
-    def mark_booking_completed(self, booking_id: int) -> bool:
-        """Legacy: отметить бронь завершённой"""
-        return self.mark_order_completed(booking_id)
-    
-    def delete_booking(self, booking_id: int) -> bool:
-        """Legacy: удалить бронь"""
-        return self.delete_order(booking_id)
-    
+
+
 _db_instance = None
 
 def get_database() -> Database:

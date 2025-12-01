@@ -1,11 +1,12 @@
 import os
-import csv
-from io import StringIO
 from datetime import datetime
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, FSInputFile, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
 from states import ReportStates
 from utils import get_main_keyboard, edit_or_send
@@ -20,15 +21,16 @@ db = get_database()
 async def reports_menu(callback: CallbackQuery):
     """Меню отчётов"""
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="👥 База клиентов", callback_data="report_clients"))
-    builder.row(InlineKeyboardButton(text="💰 Финансовый отчёт", callback_data="report_financial"))
-    builder.row(InlineKeyboardButton(text="📊 История операций", callback_data="report_operations"))
-    builder.row(InlineKeyboardButton(text="📥 Скачать CSV клиентов", callback_data="download_clients_csv"))
+    builder.row(InlineKeyboardButton(text="👥 База клиентов (Excel)", callback_data="report_clients"))
+    builder.row(InlineKeyboardButton(text="💰 Финансовый отчёт (Excel)", callback_data="report_financial"))
+    builder.row(InlineKeyboardButton(text="📊 История операций (Excel)", callback_data="report_operations"))
+    builder.row(InlineKeyboardButton(text="📦 Отчёт по оборудованию (Excel)", callback_data="report_equipment"))
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"))
     
     await edit_or_send(
         callback,
         "📈 <b>Отчёты и аналитика</b>\n\n"
+        "Все отчёты выгружаются в формате Excel\n"
         "Выберите тип отчёта:",
         reply_markup=builder.as_markup(),
         parse_mode='HTML'
@@ -96,6 +98,32 @@ async def report_operations(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "report_equipment")
+async def report_equipment(callback: CallbackQuery):
+    """Отчёт по загруженности оборудования"""
+    await callback.answer("⏳ Формирую отчёт...", show_alert=False)
+    
+    try:
+        filename = generate_equipment_report()
+        
+        await callback.message.answer_document(
+            FSInputFile(filename),
+            caption="📦 <b>Отчёт по оборудованию</b>\n\n"
+                   "Текущая загруженность и статистика использования",
+            parse_mode='HTML'
+        )
+        
+        os.remove(filename)
+        logger.info(f"Отчёт по оборудованию отправлен пользователю {callback.from_user.id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации отчёта по оборудованию: {e}")
+        await callback.message.answer(
+            "❌ Ошибка при создании отчёта",
+            reply_markup=get_main_keyboard()
+        )
+
+
 @router.message(ReportStates.entering_date_range)
 async def process_report_dates(message: Message, state: FSMContext):
     """Обработка дат для отчёта"""
@@ -120,180 +148,402 @@ async def process_report_dates(message: Message, state: FSMContext):
             await message.answer("❌ Неверный формат даты. Проверьте правильность ввода.")
             return
     
-    if report_type == 'clients':
-        await generate_clients_report(message, start_date, end_date)
-    elif report_type == 'financial':
-        await generate_financial_report(message, start_date, end_date)
-    elif report_type == 'operations':
-        await generate_operations_report(message, start_date, end_date)
+    await message.answer("⏳ Формирую отчёт...", reply_markup=get_main_keyboard())
+    
+    try:
+        if report_type == 'clients':
+            filename = generate_clients_excel(start_date, end_date)
+        elif report_type == 'financial':
+            filename = generate_financial_excel(start_date, end_date)
+        elif report_type == 'operations':
+            filename = generate_operations_excel(start_date, end_date)
+        else:
+            await message.answer("❌ Неизвестный тип отчёта")
+            await state.clear()
+            return
+        
+        period_text = "за всё время"
+        if start_date and end_date:
+            period_text = f"с {start_date} по {end_date}"
+        
+        await message.answer_document(
+            FSInputFile(filename),
+            caption=f"📊 <b>Отчёт готов!</b>\n\nПериод: {period_text}",
+            parse_mode='HTML'
+        )
+        
+        os.remove(filename)
+        logger.info(f"Отчёт {report_type} отправлен пользователю {message.from_user.id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации отчёта: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при создании отчёта",
+            reply_markup=get_main_keyboard()
+        )
     
     await state.clear()
 
 
-async def generate_clients_report(message: Message, start_date: str = None, end_date: str = None):
-    """Генерация отчёта по клиентам"""
+def style_header(ws, row_num, columns):
+    """Стилизация заголовка таблицы"""
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    
+    for col_num, column_name in enumerate(columns, 1):
+        cell = ws.cell(row=row_num, column=col_num)
+        cell.value = column_name
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+
+
+def style_data_row(ws, row_num, num_columns, is_alt=False):
+    """Стилизация строки данных"""
+    fill_color = "F2F2F2" if is_alt else "FFFFFF"
+    fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+    border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    
+    for col_num in range(1, num_columns + 1):
+        cell = ws.cell(row=row_num, column=col_num)
+        cell.fill = fill
+        cell.border = border
+        cell.alignment = Alignment(vertical='center')
+
+
+def auto_adjust_columns(ws):
+    """Автоматическая подстройка ширины столбцов"""
+    for column in ws.columns:
+        max_length = 0
+        column_letter = get_column_letter(column[0].column)
+        
+        for cell in column:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        
+        adjusted_width = min(max_length + 2, 50)
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+
+def generate_clients_excel(start_date=None, end_date=None):
+    """Генерация Excel отчёта по клиентам"""
     clients = db.get_clients_report(start_date, end_date)
     
-    if not clients:
-        await message.answer(
-            "👥 <b>Отчёт по клиентам</b>\n\n"
-            "❌ Нет данных за указанный период.",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "База клиентов"
     
-    period_text = "за всё время"
+    # Заголовок отчёта
+    ws.merge_cells('A1:F1')
+    title_cell = ws['A1']
+    title_cell.value = "ОТЧЁТ: БАЗА КЛИЕНТОВ"
+    title_cell.font = Font(bold=True, size=14, color="366092")
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    # Период
+    ws.merge_cells('A2:F2')
+    period_cell = ws['A2']
     if start_date and end_date:
-        period_text = f"с {start_date} по {end_date}"
+        period_cell.value = f"Период: {start_date} — {end_date}"
+    else:
+        period_cell.value = "Период: за всё время"
+    period_cell.alignment = Alignment(horizontal='center')
+    period_cell.font = Font(italic=True)
     
-    text = f"👥 <b>БАЗА КЛИЕНТОВ</b>\n"
-    text += f"📅 Период: {period_text}\n"
-    text += f"📊 Всего клиентов: {len(clients)}\n\n"
+    # Заголовки таблицы
+    headers = ['Имя клиента', 'Телефон', 'Первый заказ', 'Последний заказ', 'Всего заказов', 'Общая сумма']
+    style_header(ws, 4, headers)
     
-    for client_name, phone, first_order, last_order, total_orders, total_spent in clients[:20]:
-        text += f"👤 <b>{client_name}</b>\n"
-        text += f"   📞 {phone}\n"
-        text += f"   📅 Первый: {first_order[:10]}\n"
-        text += f"   📅 Последний: {last_order[:10]}\n"
-        text += f"   📦 Заказов: {total_orders}\n"
-        if total_spent > 0:
-            text += f"   💰 Сумма: {total_spent:.2f}\n"
-        text += "\n"
+    # Данные
+    for idx, client in enumerate(clients, start=5):
+        client_name, phone, first_order, last_order, total_orders, total_spent = client
+        
+        ws.cell(row=idx, column=1, value=client_name)
+        ws.cell(row=idx, column=2, value=phone)
+        ws.cell(row=idx, column=3, value=first_order[:10] if first_order else '')
+        ws.cell(row=idx, column=4, value=last_order[:10] if last_order else '')
+        ws.cell(row=idx, column=5, value=total_orders)
+        ws.cell(row=idx, column=6, value=f"{total_spent:.2f}" if total_spent else "0.00")
+        
+        style_data_row(ws, idx, 6, is_alt=(idx % 2 == 0))
     
-    if len(clients) > 20:
-        text += f"<i>... и ещё {len(clients) - 20} клиентов</i>"
+    # Итоги
+    summary_row = len(clients) + 6
+    ws.merge_cells(f'A{summary_row}:D{summary_row}')
+    summary_cell = ws[f'A{summary_row}']
+    summary_cell.value = f"ИТОГО КЛИЕНТОВ: {len(clients)}"
+    summary_cell.font = Font(bold=True)
     
-    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+    total_orders_sum = sum(c[4] for c in clients)
+    total_revenue_sum = sum(c[5] if c[5] else 0 for c in clients)
+    
+    ws.cell(row=summary_row, column=5, value=total_orders_sum).font = Font(bold=True)
+    ws.cell(row=summary_row, column=6, value=f"{total_revenue_sum:.2f}").font = Font(bold=True)
+    
+    auto_adjust_columns(ws)
+    
+    filename = f"clients_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
 
 
-async def generate_financial_report(message: Message, start_date: str = None, end_date: str = None):
-    """Генерация финансового отчёта"""
+def generate_financial_excel(start_date=None, end_date=None):
+    """Генерация Excel финансового отчёта"""
     stats = db.get_financial_report(start_date, end_date)
+    orders = db.get_operations_report(start_date, end_date)
     
-    if not stats or stats[0] == 0:
-        await message.answer(
-            "💰 <b>Финансовый отчёт</b>\n\n"
-            "❌ Нет данных за указанный период.",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Финансовый отчёт"
     
-    total_bookings, total_revenue, avg_order = stats
+    # Заголовок
+    ws.merge_cells('A1:E1')
+    title_cell = ws['A1']
+    title_cell.value = "ФИНАНСОВЫЙ ОТЧЁТ"
+    title_cell.font = Font(bold=True, size=14, color="366092")
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
     
-    period_text = "за всё время"
+    # Период
+    ws.merge_cells('A2:E2')
+    period_cell = ws['A2']
     if start_date and end_date:
-        period_text = f"с {start_date} по {end_date}"
+        period_cell.value = f"Период: {start_date} — {end_date}"
+    else:
+        period_cell.value = "Период: за всё время"
+    period_cell.alignment = Alignment(horizontal='center')
+    period_cell.font = Font(italic=True)
     
-    text = f"💰 <b>ФИНАНСОВЫЙ ОТЧЁТ</b>\n"
-    text += f"📅 Период: {period_text}\n\n"
-    text += f"📦 Всего бронирований: {total_bookings}\n"
-    text += f"💵 Общая выручка: {total_revenue:.2f}\n"
-    text += f"📊 Средний чек: {avg_order:.2f}\n"
+    # Статистика
+    if stats:
+        total_orders, total_revenue, avg_order = stats
+        
+        ws['A4'] = "СВОДКА:"
+        ws['A4'].font = Font(bold=True, size=12)
+        
+        ws['A5'] = "Всего заказов:"
+        ws['B5'] = total_orders
+        ws['B5'].font = Font(bold=True)
+        
+        ws['A6'] = "Общая выручка:"
+        ws['B6'] = f"{total_revenue:.2f} руб." if total_revenue else "0.00 руб."
+        ws['B6'].font = Font(bold=True, color="00AA00")
+        
+        ws['A7'] = "Средний чек:"
+        ws['B7'] = f"{avg_order:.2f} руб." if avg_order else "0.00 руб."
+        ws['B7'].font = Font(bold=True)
     
-    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+    # Таблица заказов
+    ws['A9'] = "ДЕТАЛИЗАЦИЯ ПО ЗАКАЗАМ:"
+    ws['A9'].font = Font(bold=True, size=11)
+    
+    headers = ['№ Заказа', 'Клиент', 'Период', 'Стоимость', 'Статус']
+    style_header(ws, 10, headers)
+    
+    for idx, order in enumerate(orders, start=11):
+        order_id, client_name, client_phone, start, end, cost, status, created_at, completed_at = order
+        
+        ws.cell(row=idx, column=1, value=f"#{order_id}")
+        ws.cell(row=idx, column=2, value=f"{client_name} ({client_phone})")
+        ws.cell(row=idx, column=3, value=f"{start} — {end}")
+        ws.cell(row=idx, column=4, value=cost if cost else "—")
+        
+        status_map = {
+            'pending': 'Ожидает выдачи',
+            'issued': 'Выдано',
+            'overdue': 'Просрочено',
+            'completed': 'Завершено'
+        }
+        ws.cell(row=idx, column=5, value=status_map.get(status, status))
+        
+        style_data_row(ws, idx, 5, is_alt=(idx % 2 == 0))
+    
+    auto_adjust_columns(ws)
+    
+    filename = f"financial_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
 
 
-async def generate_operations_report(message: Message, start_date: str = None, end_date: str = None):
-    """Генерация отчёта по операциям"""
+def generate_operations_excel(start_date=None, end_date=None):
+    """Генерация Excel отчёта по операциям"""
     operations = db.get_operations_report(start_date, end_date)
     
-    if not operations:
-        await message.answer(
-            "📊 <b>История операций</b>\n\n"
-            "❌ Нет операций за указанный период.",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "История операций"
     
-    period_text = "за всё время"
+    # Заголовок
+    ws.merge_cells('A1:H1')
+    title_cell = ws['A1']
+    title_cell.value = "ИСТОРИЯ ОПЕРАЦИЙ"
+    title_cell.font = Font(bold=True, size=14, color="366092")
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    # Период
+    ws.merge_cells('A2:H2')
+    period_cell = ws['A2']
     if start_date and end_date:
-        period_text = f"с {start_date} по {end_date}"
+        period_cell.value = f"Период: {start_date} — {end_date}"
+    else:
+        period_cell.value = "Период: за всё время"
+    period_cell.alignment = Alignment(horizontal='center')
+    period_cell.font = Font(italic=True)
     
-    active_count = sum(1 for op in operations if op[6] == 'active')
-    completed_count = sum(1 for op in operations if op[6] == 'completed')
-    
-    text = f"📊 <b>ИСТОРИЯ ОПЕРАЦИЙ</b>\n"
-    text += f"📅 Период: {period_text}\n"
-    text += f"📈 Всего операций: {len(operations)}\n"
-    text += f"✅ Активные: {active_count}\n"
-    text += f"🏁 Завершённые: {completed_count}\n\n"
-    
-    for op in operations[:15]:
-        # order_id, client_name, client_phone, start_date, end_date, cost, status, created_at, completed_at
-        order_id = op[0]
-        client_name = op[1]
-        client_phone = op[2]
-        start = op[3]
-        end = op[4]
-        cost = op[5]
+    # Статистика по статусам
+    status_stats = {}
+    for op in operations:
         status = op[6]
-        created = op[7]
-        completed = op[8] if len(op) > 8 else None
-        
-        # Получаем позиции заказа
-        items = db.get_order_items(order_id)
-        
-        status_emoji = "✅" if status == 'active' else "🏁"
-        text += f"{status_emoji} <b>Заказ #{order_id}</b>\n"
-        text += f"   👤 {client_name} ({client_phone})\n"
-        text += f"   📅 {start} — {end}\n"
-        
-        if items:
-            text += "   📦 "
-            items_text = ", ".join([f"{item_name}×{quantity}" for _, item_name, quantity, _ in items])
-            text += f"{items_text}\n"
-        
-        if cost:
-            text += f"   💰 {cost}\n"
-        text += f"   📝 Создан: {created[:16]}\n"
-        if completed:
-            text += f"   ✅ Завершён: {completed[:16]}\n"
-        text += "\n"
+        status_stats[status] = status_stats.get(status, 0) + 1
     
-    if len(operations) > 15:
-        text += f"<i>... и ещё {len(operations) - 15} операций</i>"
+    ws['A4'] = "СТАТИСТИКА:"
+    ws['A4'].font = Font(bold=True, size=11)
     
-    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+    row = 5
+    status_map = {
+        'pending': 'Ожидает выдачи',
+        'issued': 'Выдано',
+        'overdue': 'Просрочено',
+        'completed': 'Завершено'
+    }
+    
+    for status, count in status_stats.items():
+        ws.cell(row=row, column=1, value=f"{status_map.get(status, status)}:")
+        ws.cell(row=row, column=2, value=count)
+        ws.cell(row=row, column=2).font = Font(bold=True)
+        row += 1
+    
+    # Таблица операций
+    ws[f'A{row + 1}'] = "ДЕТАЛЬНАЯ ИНФОРМАЦИЯ:"
+    ws[f'A{row + 1}'].font = Font(bold=True, size=11)
+    
+    headers = ['№', 'Клиент', 'Телефон', 'Начало', 'Конец', 'Стоимость', 'Статус', 'Создан']
+    style_header(ws, row + 2, headers)
+    
+    data_start_row = row + 3
+    for idx, op in enumerate(operations, start=data_start_row):
+        order_id, client_name, client_phone, start, end, cost, status, created_at, completed_at = op
+        
+        ws.cell(row=idx, column=1, value=f"#{order_id}")
+        ws.cell(row=idx, column=2, value=client_name)
+        ws.cell(row=idx, column=3, value=client_phone)
+        ws.cell(row=idx, column=4, value=start)
+        ws.cell(row=idx, column=5, value=end)
+        ws.cell(row=idx, column=6, value=cost if cost else "—")
+        ws.cell(row=idx, column=7, value=status_map.get(status, status))
+        ws.cell(row=idx, column=8, value=created_at[:16] if created_at else "")
+        
+        # Цветовое выделение по статусу
+        status_colors = {
+            'pending': 'FFF4E6',
+            'issued': 'E7F3FF',
+            'overdue': 'FFE7E7',
+            'completed': 'E7FFE7'
+        }
+        if status in status_colors:
+            for col in range(1, 9):
+                ws.cell(row=idx, column=col).fill = PatternFill(
+                    start_color=status_colors[status],
+                    end_color=status_colors[status],
+                    fill_type="solid"
+                )
+        
+        style_data_row(ws, idx, 8, is_alt=False)
+    
+    auto_adjust_columns(ws)
+    
+    filename = f"operations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
 
-@router.callback_query(F.data == "download_clients_csv")
-async def download_clients_csv(callback: CallbackQuery):
-    """Скачивание CSV файла с клиентами"""
-    clients = db.get_clients_report()
+
+def generate_equipment_report():
+    """Генерация отчёта по оборудованию"""
+    resources = db.get_resources()
+    today = datetime.now().strftime('%Y-%m-%d')
     
-    if not clients:
-        await callback.answer("❌ Нет данных для выгрузки", show_alert=True)
-        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Оборудование"
     
-    csv_content = StringIO()
-    writer = csv.writer(csv_content)
+    # Заголовок
+    ws.merge_cells('A1:F1')
+    title_cell = ws['A1']
+    title_cell.value = "ОТЧЁТ ПО ОБОРУДОВАНИЮ"
+    title_cell.font = Font(bold=True, size=14, color="366092")
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
     
-    writer.writerow([
-        'Имя клиента',
-        'Телефон',
-        'Первый заказ',
-        'Последний заказ',
-        'Всего заказов',
-        'Общая сумма'
-    ])
+    ws.merge_cells('A2:F2')
+    date_cell = ws['A2']
+    date_cell.value = f"Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    date_cell.alignment = Alignment(horizontal='center')
+    date_cell.font = Font(italic=True)
     
-    for client in clients:
-        writer.writerow(client)
+    # Заголовки
+    headers = ['Название', 'Всего единиц', 'Доступно сейчас', 'Забронировано', '% загрузки', 'Статус']
+    style_header(ws, 4, headers)
     
-    filename = f"clients_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    with open(filename, 'w', encoding='utf-8-sig', newline='') as f:
-        f.write(csv_content.getvalue())
+    for idx, resource in enumerate(resources, start=5):
+        res_id, name, description, total_quantity = resource
+        
+        # Проверяем доступность на сегодня
+        available = db.get_available_quantity(res_id, today, today)
+        booked = total_quantity - available
+        utilization = (booked / total_quantity * 100) if total_quantity > 0 else 0
+        
+        ws.cell(row=idx, column=1, value=name)
+        ws.cell(row=idx, column=2, value=total_quantity)
+        ws.cell(row=idx, column=3, value=available)
+        ws.cell(row=idx, column=4, value=booked)
+        ws.cell(row=idx, column=5, value=f"{utilization:.1f}%")
+        
+        # Статус
+        if available == 0:
+            status = "Полностью занято"
+            status_color = "FFE7E7"
+        elif available < total_quantity * 0.3:
+            status = "Высокая загрузка"
+            status_color = "FFF4E6"
+        else:
+            status = "Доступно"
+            status_color = "E7FFE7"
+        
+        ws.cell(row=idx, column=6, value=status)
+        
+        # Цветовое выделение
+        for col in range(1, 7):
+            ws.cell(row=idx, column=col).fill = PatternFill(
+                start_color=status_color,
+                end_color=status_color,
+                fill_type="solid"
+            )
+        
+        style_data_row(ws, idx, 6, is_alt=False)
     
-    try:
-        await callback.message.answer_document(
-            FSInputFile(filename),
-            caption=f"📊 <b>База клиентов</b>\nВсего записей: {len(clients)}",
-            parse_mode='HTML'
-        )
-        os.remove(filename)
-        await callback.answer("✅ Файл отправлен!")
-    except Exception as e:
-        logger.error(f"Ошибка отправки CSV: {e}")
-        await callback.answer("❌ Ошибка при создании файла", show_alert=True)
+    # Итоги
+    summary_row = len(resources) + 6
+    ws.merge_cells(f'A{summary_row}:F{summary_row}')
+    summary_cell = ws[f'A{summary_row}']
+    summary_cell.value = f"ВСЕГО ПОЗИЦИЙ: {len(resources)}"
+    summary_cell.font = Font(bold=True)
+    summary_cell.alignment = Alignment(horizontal='center')
+    
+    auto_adjust_columns(ws)
+    
+    filename = f"equipment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename

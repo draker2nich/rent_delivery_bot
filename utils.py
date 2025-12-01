@@ -3,9 +3,9 @@ from typing import Optional, Tuple
 from aiogram.types import InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import logger
-from database import Database
+from database import get_database  # ИСПРАВЛЕНО: используем singleton
 
-db = Database()
+db = get_database()  # ИСПРАВЛЕНО: вместо Database()
 
 
 def parse_date_range(text: str) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:

@@ -485,35 +485,47 @@ async def enter_delivery_comment(message: Message, state: FSMContext):
 @router.message(BookingStates.entering_cost)
 async def enter_cost(message: Message, state: FSMContext):
     """Ввод стоимости и создание брони"""
+    
+    # Валидация стоимости
+    cost_text = message.text.strip().replace(',', '.')
+    
+    # Проверка на пустую строку (можно не указывать стоимость)
+    if cost_text and cost_text != '-':
+        try:
+            cost_value = float(cost_text)
+            if cost_value < 0:
+                await message.answer(
+                    "❌ Стоимость не может быть отрицательной!\n\n"
+                    "Введите корректную стоимость или '-' для пропуска:"
+                )
+                return
+        except ValueError:
+            await message.answer(
+                "❌ Неверный формат стоимости!\n\n"
+                "Введите число (например: 5000 или 5000.50)\n"
+                "Или '-' для пропуска:"
+            )
+            return
+    
+    # Нормализуем стоимость
+    if not cost_text or cost_text == '-':
+        cost_text = ''
+    
     data = await state.get_data()
     
-    # Создаем заказ
-    order_id = db.create_order(
+    # ИСПОЛЬЗУЕМ НОВЫЙ АТОМАРНЫЙ МЕТОД
+    order_id = db.create_order_with_items(
         client_id=data['client_id'],
         start_date=data['start_date'],
         end_date=data['end_date'],
         delivery_type=data['delivery_type'],
         delivery_comment=data['delivery_comment'],
-        cost=message.text,
-        created_by=message.from_user.id
+        cost=cost_text,
+        created_by=message.from_user.id,
+        items=data['order_items']
     )
     
-    if not order_id:
-        await message.answer(
-            "❌ Ошибка создания заказа.",
-            reply_markup=get_main_keyboard()
-        )
-        await state.clear()
-        return
-    
-    # Добавляем все позиции
-    success = True
-    for item in data['order_items']:
-        if not db.add_order_item(order_id, item['resource_id'], item['quantity']):
-            success = False
-            break
-    
-    if success:
+    if order_id:
         delivery_emoji = "🚗" if data['delivery_type'] == 'delivery' else "🏃"
         delivery_text = "Доставка" if data['delivery_type'] == 'delivery' else "Самовывоз"
         
@@ -526,13 +538,14 @@ async def enter_cost(message: Message, state: FSMContext):
             text += f"   • {item['name']}: {item['quantity']} шт.\n"
         text += f"\n{delivery_emoji} Тип: {delivery_text}\n"
         text += f"💬 Комментарий: {data['delivery_comment']}\n"
-        text += f"💰 Стоимость: {message.text}"
+        if cost_text:
+            text += f"💰 Стоимость: {cost_text}"
         
         await message.answer(text, reply_markup=get_main_keyboard(), parse_mode='HTML')
     else:
-        db.delete_order(order_id)
         await message.answer(
-            "❌ Ошибка добавления позиций в заказ.",
+            "❌ Ошибка создания заказа.\n"
+            "Возможно, оборудование уже забронировано на эти даты.",
             reply_markup=get_main_keyboard()
         )
     
